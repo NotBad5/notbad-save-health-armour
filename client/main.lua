@@ -1,36 +1,87 @@
-if Config.ESX then
-    RegisterNetEvent('esx:playerLoaded')
-    AddEventHandler('esx:playerLoaded', function(playerData)
-        TriggerServerEvent("notbad-save-health-armour:loadData")
+-- notbad-save-health-armour
+-- Tells the server when the player is in the world, then applies what the server sends back.
+
+local framework = ResolveFramework()
+local asked = false
+
+local function askServer(delay)
+    if asked then return end
+    asked = true
+    CreateThread(function()
+        Wait(delay or 0)
+        asked = false
+        TriggerServerEvent(EVT .. ':ready')
     end)
 end
 
-if Config.QBCORE then
-    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
-        Citizen.Wait(2000)
-        TriggerServerEvent("notbad-save-health-armour:loadData")
-    end)
+local function apply(data)
+    local ped = PlayerPedId()
+
+    if data.Health then
+        if data.Health <= DEAD_HEALTH then
+            if Config.DeadPlayers == 'kill' then SetEntityHealth(ped, 0) end
+        else
+            SetEntityHealth(ped, math.min(math.floor(data.Health), GetEntityMaxHealth(ped)))
+        end
+    end
+
+    if data.Armour then
+        SetPedArmour(ped, math.max(0, math.min(math.floor(data.Armour), 100)))
+    end
+
+    return ped
 end
 
-if Config.Standalone then
-    Citizen.CreateThread(function()
-        while true do
-            Citizen.Wait(0)
-            local playerPed = PlayerPedId()
-            if playerPed and playerPed ~= -1 then
-                if NetworkIsPlayerActive(PlayerId()) then
-                    Citizen.Wait(5000)
-                    TriggerServerEvent("notbad-save-health-armour:loadData")
-                    break
-                end
+RegisterNetEvent(EVT .. ':apply', function(data)
+    if type(data) == 'table' then
+        local ped = apply(data)
+
+        -- a model change (clothing, character select) gives a new ped with full health: put the values back
+        local deadline = GetGameTimer() + (Config.ReapplySeconds * 1000)
+        while GetGameTimer() < deadline do
+            Wait(500)
+            if PlayerPedId() ~= ped then
+                ped = apply(data)
             end
         end
+    end
+
+    -- from now on the server keeps track of the real values
+    TriggerServerEvent(EVT .. ':applied')
+end)
+
+-- ---------------------------------------------------------------------------
+-- When is the player ready?
+-- ---------------------------------------------------------------------------
+
+if framework == 'esx' then
+    RegisterNetEvent('esx:playerLoaded', function()
+        askServer(2000)
+    end)
+
+    -- resource restarted while the player was already in
+    CreateThread(function()
+        local ok, ESX = pcall(function() return exports['es_extended']:getSharedObject() end)
+        if ok and ESX and ESX.IsPlayerLoaded and ESX.IsPlayerLoaded() then askServer(0) end
+    end)
+
+elseif framework == 'qb' or framework == 'qbx' then
+    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+        askServer(2000)
+    end)
+
+    CreateThread(function()
+        if LocalPlayer.state.isLoggedIn then askServer(0) end
+    end)
+
+else
+    -- standalone: wait for the first spawn, or a few seconds after the session is active
+    AddEventHandler('playerSpawned', function()
+        askServer(1000)
+    end)
+
+    CreateThread(function()
+        while not NetworkIsPlayerActive(PlayerId()) do Wait(250) end
+        askServer(8000)
     end)
 end
-
-RegisterNetEvent('notbad-save-health-armour:setData')
-AddEventHandler('notbad-save-health-armour:setData', function(data)
-    local playerPed = GetPlayerPed(-1)
-    local health = SetEntityHealth(playerPed, data.Health)
-    local armour = SetPedArmour(playerPed, data.Armour)
-end)
